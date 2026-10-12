@@ -121,7 +121,7 @@ class MainActivity : Activity() {
                 }
                 override fun onError(error: Int) {
                     status.text = "$mode / $chosenLocale: error $error (${errorDescription(error)})"
-                    finish()
+                    finishRecognition()
                 }
                 override fun onResults(results: Bundle?) {
                     val candidates = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -132,7 +132,7 @@ class MainActivity : Activity() {
                     while (records.size > 20) records.removeLast()
                     history.text = "History (current app session):\n" + records.joinToString("\n\n")
                     status.text = "$mode / $chosenLocale: completed in ${elapsed} ms"
-                    finish()
+                    finishRecognition()
                 }
                 override fun onPartialResults(partialResults: Bundle?) {
                     val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
@@ -155,11 +155,11 @@ class MainActivity : Activity() {
             sr.startListening(intent)
         } catch (e: Exception) {
             status.text = "Failed to start: ${e.message}"
-            finish()
+            finishRecognition()
         }
     }
 
-    private fun finish() {
+    private fun finishRecognition() {
         startOffline.isEnabled = true
         startDefault.isEnabled = true
         stop.isEnabled = false
