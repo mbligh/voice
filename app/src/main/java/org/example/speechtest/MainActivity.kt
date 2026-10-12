@@ -3,6 +3,7 @@ package org.example.speechtest
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.SystemClock
@@ -30,6 +31,8 @@ class MainActivity : Activity() {
     private lateinit var history: TextView
     private lateinit var startOffline: Button
     private lateinit var startDefault: Button
+    private lateinit var navigateButton: Button
+    private var navigateAfterRecognition = false
     private lateinit var stop: Button
     private var recognizer: SpeechRecognizer? = null
     private var started = 0L
@@ -88,6 +91,11 @@ class MainActivity : Activity() {
             text = "Start default"
             root.addView(this)
             setOnClickListener { begin(false) }
+        }
+        navigateButton = Button(this).apply {
+            text = "Navigate by voice (on-device)"
+            root.addView(this)
+            setOnClickListener { begin(true, navigate = true) }
         }
         stop = Button(this).apply {
             text = "Stop listening"
@@ -193,7 +201,7 @@ class MainActivity : Activity() {
         if (code != TextToSpeech.SUCCESS) ttsStatus.text = "Failed to queue speech"
     }
 
-    private fun begin(onDevice: Boolean) {
+    private fun begin(onDevice: Boolean, navigate: Boolean = false) {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), permissionCode)
             status.text = "Microphone permission required. Tap start again after granting."
@@ -206,6 +214,7 @@ class MainActivity : Activity() {
         recognizer?.destroy()
         recognizer = null
         mode = if (onDevice) "On-device" else "Default"
+        navigateAfterRecognition = navigate
         val chosenLocale = locale
         try {
             val sr = if (onDevice) SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
@@ -236,7 +245,9 @@ class MainActivity : Activity() {
                     while (records.size > 20) records.removeLast()
                     history.text = "History (current app session):\n" + records.joinToString("\n\n")
                     status.text = "$mode / $chosenLocale: completed in ${elapsed} ms"
+                    val shouldNavigate = navigateAfterRecognition && candidates?.firstOrNull()?.isNotBlank() == true
                     finishRecognition()
+                    if (shouldNavigate) openNavigation(recognized)
                 }
                 override fun onPartialResults(partialResults: Bundle?) {
                     val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
@@ -254,6 +265,7 @@ class MainActivity : Activity() {
             started = SystemClock.elapsedRealtime()
             startOffline.isEnabled = false
             startDefault.isEnabled = false
+            navigateButton.isEnabled = false
             stop.isEnabled = true
             result.text = "Listening..."
             sr.startListening(intent)
@@ -263,9 +275,27 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun openNavigation(destination: String) {
+        // Google Maps resolves the spoken destination and handles the actual routing.
+        val uri = Uri.parse("google.navigation:q=" + Uri.encode(destination))
+        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+            setPackage("com.google.android.apps.maps")
+        }
+        try {
+            startActivity(intent)
+            status.text = "Opening Google Maps navigation to: $destination"
+        } catch (e: android.content.ActivityNotFoundException) {
+            status.text = "Google Maps not installed or unable to handle navigation"
+        } catch (e: Exception) {
+            status.text = "Could not launch navigation: ${e.message}"
+        }
+    }
+
     private fun finishRecognition() {
         startOffline.isEnabled = true
         startDefault.isEnabled = true
+        navigateButton.isEnabled = true
+        navigateAfterRecognition = false
         stop.isEnabled = false
         recognizer?.destroy()
         recognizer = null
