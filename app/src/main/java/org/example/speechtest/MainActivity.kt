@@ -4,6 +4,15 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.MessageCallback
+import java.io.File
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.SystemClock
@@ -47,6 +56,17 @@ class MainActivity : Activity() {
     private var ttsVoices: List<android.speech.tts.Voice> = emptyList()
     private var speechRate = 1.0f
     private var speechPitch = 1.0f
+    private var llmEngine: Engine? = null
+    private var llmConversation: Conversation? = null
+    private var llmBusy = false
+    private lateinit var llmStatus: TextView
+    private lateinit var llmOutput: TextView
+    private lateinit var llmPrompt: EditText
+    private lateinit var llmLoad: Button
+    private lateinit var llmAsk: Button
+    private val ui = Handler(Looper.getMainLooper())
+    private val modelFile by lazy { File(filesDir, "gemma-4-E2B-it.litertlm") }
+    private val modelPickerCode = 88
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -144,10 +164,152 @@ class MainActivity : Activity() {
             root.addView(this)
             setOnClickListener { tts?.stop() }
         }
+        label("Gemma 4 E2B (local)", 22f)
+        llmStatus = label("Model not loaded", 14f)
+        llmLoad = Button(this).apply {
+            text = "Load Gemma model"
+            root.addView(this)
+            setOnClickListener {
+                if (modelFile.exists()) loadGemma() else pickGemmaFile()
+            }
+        }
+        Button(this).apply {
+            text = "Import .litertlm model file"
+            root.addView(this)
+            setOnClickListener { pickGemmaFile() }
+        }
+        llmPrompt = EditText(this).apply {
+            hint = "Ask Gemma a question"
+            setSingleLine(false)
+            minLines = 2
+            root.addView(this)
+        }
+        llmAsk = Button(this).apply {
+            text = "Ask Gemma"
+            isEnabled = false
+            root.addView(this)
+            setOnClickListener { askGemma(llmPrompt.text.toString()) }
+        }
+        Button(this).apply {
+            text = "Reset Gemma conversation"
+            root.addView(this)
+            setOnClickListener {
+                if (!llmBusy && llmEngine != null) {
+                    llmConversation?.close()
+                    llmConversation = llmEngine!!.createConversation()
+                    llmStatus.text = "Conversation reset; model remains loaded"
+                }
+            }
+        }
+        llmOutput = label("Gemma response will appear here", 17f)
+        if (modelFile.exists()) loadGemma()
         initTts()
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), permissionCode)
         }
+    }
+
+    private fun pickGemmaFile() {
+        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "*/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }, modelPickerCode)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != modelPickerCode || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        if (llmEngine != null || llmBusy) {
+            llmStatus.text = "Restart app before replacing the loaded model"
+            return
+        }
+        llmBusy = true
+        llmLoad.isEnabled = false
+        llmStatus.text = "Importing model to private app storage..."
+        Thread {
+            val temp = File(filesDir, "gemma-import.tmp")
+            try {
+                contentResolver.openInputStream(uri).use { input ->
+                    requireNotNull(input) { "Cannot open selected file" }
+                    temp.outputStream().use { output -> input.copyTo(output) }
+                }
+                if (modelFile.exists()) modelFile.delete()
+                check(temp.renameTo(modelFile)) { "Unable to install model file" }
+                ui.post { llmBusy = false; loadGemma() }
+            } catch (e: Exception) {
+                temp.delete()
+                ui.post {
+                    llmBusy = false
+                    llmLoad.isEnabled = true
+                    llmStatus.text = "Import failed: ${e.message}"
+                }
+            }
+        }.start()
+    }
+
+    private fun loadGemma() {
+        if (llmBusy || llmEngine != null) return
+        llmBusy = true
+        llmLoad.isEnabled = false
+        llmStatus.text = "Initializing Gemma..."
+        Thread {
+            val startedAt = SystemClock.elapsedRealtime()
+            var engine: Engine? = null
+            try {
+                engine = Engine(EngineConfig(modelPath = modelFile.absolutePath,
+                    backend = Backend.CPU(), cacheDir = cacheDir.absolutePath))
+                engine.initialize()
+                val conversation = engine.createConversation()
+                ui.post {
+                    llmEngine = engine
+                    llmConversation = conversation
+                    llmBusy = false
+                    llmAsk.isEnabled = true
+                    llmStatus.text = "Gemma ready; initialization ${SystemClock.elapsedRealtime() - startedAt} ms"
+                }
+            } catch (e: Exception) {
+                engine?.close()
+                ui.post {
+                    llmBusy = false
+                    llmLoad.isEnabled = true
+                    llmStatus.text = "Gemma initialization failed: ${e.message}"
+                }
+            }
+        }.start()
+    }
+
+    private fun askGemma(prompt: String) {
+        val conversation = llmConversation ?: return
+        if (llmBusy || prompt.isBlank()) return
+        llmBusy = true
+        llmAsk.isEnabled = false
+        llmOutput.text = ""
+        val startedAt = SystemClock.elapsedRealtime()
+        var firstTokenAt = 0L
+        val response = StringBuilder()
+        conversation.sendMessageAsync(prompt, object : MessageCallback {
+            override fun onMessage(message: Message) {
+                val chunk = message.toString()
+                if (firstTokenAt == 0L) firstTokenAt = SystemClock.elapsedRealtime()
+                response.append(chunk)
+                ui.post { llmOutput.text = response.toString() }
+            }
+            override fun onDone() {
+                ui.post {
+                    llmBusy = false
+                    llmAsk.isEnabled = true
+                    llmStatus.text = "Ready; first token ${firstTokenAt - startedAt} ms, total ${SystemClock.elapsedRealtime() - startedAt} ms"
+                }
+            }
+            override fun onError(throwable: Throwable) {
+                ui.post {
+                    llmBusy = false
+                    llmAsk.isEnabled = true
+                    llmStatus.text = "Generation failed: ${throwable.message}"
+                }
+            }
+        })
     }
 
     private fun initTts() {
@@ -320,6 +482,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         recognizer?.destroy()
+        llmConversation?.close()
+        llmEngine?.close()
         tts?.stop()
         tts?.shutdown()
         super.onDestroy()
