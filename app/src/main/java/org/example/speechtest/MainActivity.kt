@@ -9,6 +9,13 @@ import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.widget.EditText
+import android.widget.SeekBar
+import android.widget.Spinner
+import android.widget.ArrayAdapter
+import java.util.Locale
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
@@ -30,6 +37,13 @@ class MainActivity : Activity() {
     private var locale = "en-GB"
     private val records = ArrayDeque<String>()
     private val permissionCode = 42
+    private var tts: TextToSpeech? = null
+    private lateinit var voiceSpinner: Spinner
+    private lateinit var ttsStatus: TextView
+    private lateinit var ttsText: EditText
+    private var ttsVoices: List<android.speech.tts.Voice> = emptyList()
+    private var speechRate = 1.0f
+    private var speechPitch = 1.0f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,9 +98,99 @@ class MainActivity : Activity() {
         status = label("Ready", 15f)
         result = label("Transcription will appear here", 19f)
         history = label("History (current app session):", 14f)
+        label("Text-to-speech (offline voices only)", 22f)
+        ttsStatus = label("Initializing text-to-speech...", 14f)
+        voiceSpinner = Spinner(this).apply { root.addView(this) }
+        ttsText = EditText(this).apply {
+            setSingleLine(false)
+            minLines = 2
+            setText("Hello. This is a test of British English text to speech on this phone.")
+            root.addView(this)
+        }
+        fun control(title: String, initial: Int, changed: (Float) -> Unit) {
+            val display = label("$title: 1.00", 14f)
+            val slider = SeekBar(this).apply {
+                max = 180
+                progress = initial
+                root.addView(this)
+            }
+            slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val value = (progress + 20) / 100f
+                    display.text = "$title: " + String.format(Locale.US, "%.2f", value)
+                    changed(value)
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) {}
+                override fun onStopTrackingTouch(bar: SeekBar?) {}
+            })
+        }
+        control("Speed", 80) { speechRate = it }
+        control("Pitch", 80) { speechPitch = it }
+        Button(this).apply {
+            text = "Speak (offline voice)"
+            root.addView(this)
+            setOnClickListener { speakTest() }
+        }
+        Button(this).apply {
+            text = "Stop speech"
+            root.addView(this)
+            setOnClickListener { tts?.stop() }
+        }
+        initTts()
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), permissionCode)
         }
+    }
+
+    private fun initTts() {
+        tts = TextToSpeech(this) { result ->
+            if (result != TextToSpeech.SUCCESS) {
+                ttsStatus.text = "Text-to-speech initialization failed ($result)"
+            } else {
+                val engine = tts ?: return@TextToSpeech
+                val voices = engine.voices ?: emptySet()
+                ttsVoices = voices.filter {
+                    it.locale.language == "en" && !it.isNetworkConnectionRequired
+                }.sortedWith(compareBy({ it.locale.toLanguageTag() != "en-GB" }, { it.name }))
+                val names = ttsVoices.map {
+                    "${it.locale.toLanguageTag()} — ${it.name} (offline)"
+                }
+                voiceSpinner.adapter = ArrayAdapter(
+                    this, android.R.layout.simple_spinner_dropdown_item,
+                    if (names.isEmpty()) listOf("No offline English voices installed") else names
+                )
+                ttsStatus.text = "Engine: ${engine.defaultEngine}; ${ttsVoices.size} offline English voices. Only voices marked as not requiring a network are shown."
+                engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {
+                        runOnUiThread { ttsStatus.text = "Speaking..." }
+                    }
+                    override fun onDone(utteranceId: String?) {
+                        runOnUiThread { ttsStatus.text = "Speech completed (offline-capable voice)" }
+                    }
+                    override fun onError(utteranceId: String?) {
+                        runOnUiThread { ttsStatus.text = "Speech synthesis failed" }
+                    }
+                })
+            }
+        }
+    }
+
+    private fun speakTest() {
+        val engine = tts ?: return
+        val voice = ttsVoices.getOrNull(voiceSpinner.selectedItemPosition)
+        if (voice == null) {
+            ttsStatus.text = "No offline English voice available"
+            return
+        }
+        val selected = engine.setVoice(voice)
+        if (selected != TextToSpeech.SUCCESS) {
+            ttsStatus.text = "Could not select offline voice"
+            return
+        }
+        engine.setSpeechRate(speechRate)
+        engine.setPitch(speechPitch)
+        val code = engine.speak(ttsText.text.toString(), TextToSpeech.QUEUE_FLUSH, null, "voice-test")
+        if (code != TextToSpeech.SUCCESS) ttsStatus.text = "Failed to queue speech"
     }
 
     private fun begin(onDevice: Boolean) {
@@ -186,6 +290,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         recognizer?.destroy()
+        tts?.stop()
+        tts?.shutdown()
         super.onDestroy()
     }
 }
