@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -26,3 +28,12 @@ jobs:
         with:
           name: voice-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Publish APK to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk voice-debug.apk
+          gh release create "build-${GITHUB_RUN_NUMBER}" voice-debug.apk \
+            --title "Build ${GITHUB_RUN_NUMBER}" \
+            --notes "Automatic debug APK from commit ${GITHUB_SHA}." \
+            --latest
